@@ -77,8 +77,6 @@ class STLFormula:
         node.trajectory_until_node_humanreferential = node_old_trajectory_until_node_humanreferential
         
         return STLFormula.cost_node(candidate_parent.stl_cost,candidate_parent.rho_bar,node_rho_bar_val)
-        
-        
 
 class TrueF(STLFormula):
     """
@@ -94,7 +92,6 @@ class TrueF(STLFormula):
     def __str__(self):
         return "\\top"
 
-
 class FalseF(STLFormula):
     """
     Class representing the False boolean constant
@@ -108,7 +105,6 @@ class FalseF(STLFormula):
         
     def __str__(self):
         return "\\bot"
-
 
 class Predicate(STLFormula):
     """
@@ -143,7 +139,6 @@ class Predicate(STLFormula):
     
     def __str__(self):
         return self.dimension+operators_iv[self.operator]+str(self.mu)
-
 
 class STLPredicate2D(STLFormula):
     """
@@ -214,8 +209,7 @@ class STLPredicate2D(STLFormula):
     def __str__(self):
         return "("+str(round(self.alpha,3))+" < x < "+str(round(self.beta,3))+" \wedge "+str(round(self.gamma,3))+" < y < "+str(round(self.delta,3))+")"
 
-
-class Conjunction(STLFormula): 
+class Conjunction(STLFormula):
     """
     Class representing the Conjunction operator, s.t. \phi_1 \wedge \phi_2 \wedge \ldots \wedge \phi_n.
     The constructor takes 1 arguments:
@@ -237,8 +231,7 @@ class Conjunction(STLFormula):
             s += str(conj) + " \wedge "
         return s[:-8]+")"
 
-
-class Negation(STLFormula): 
+class Negation(STLFormula):
     """
     Class representing the Negation operator, s.t. \neg \phi.
     The constructor takes 1 argument:
