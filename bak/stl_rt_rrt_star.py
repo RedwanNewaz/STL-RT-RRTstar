@@ -1,29 +1,33 @@
 """
 
-Path planning Sample Code with RRT*
+Real-time path planning with RRT* and STL constraints
 
-author: Atsushi Sakai(@Atsushi_twi)
+author: Alexis Linard
 
 """
 
-import math
-import os
 import sys
-import time 
-import random
-import pickle, dill
-from collections import deque
-import itertools, more_itertools
-
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import numpy as np
-
-from ellipsis import get_random_node_ellipsis_sampling
-
 sys.setrecursionlimit(10000)
 
+import math
+import time 
+import random
+import dill
+from collections import deque
+import itertools, more_itertools
+import numpy as np
+
+import matplotlib.pyplot as plt
+from matplotlib.path import Path
+import matplotlib.patches as patches
+
+from util.ellipsis import get_random_node_ellipsis_sampling
+
 show_animation = False
+
+
+from util.STLFormula import *
+
 
 
 class RRTStar():
@@ -39,20 +43,25 @@ class RRTStar():
         def __init__(self, x, y):
             self.x = x
             self.y = y
+            self.x_humanreferential = None
+            self.y_humanreferential = None
             self.path_x = []
             self.path_y = []
             self.parent = None            
             self.children = {}
             self.cost = 0.0
             self.blocking_cost = 0.0
-            self.total_cost = lambda: self.cost + self.blocking_cost
+            self.stl_cost = 0.0
+            self.rho_bar = float("-inf")
+            self.total_cost = lambda: self.cost + self.blocking_cost + self.stl_cost
             self.trajectory_until_node = []
+            self.trajectory_until_node_humanreferential = []
             
         def __str__(self):
-            return '('+str(round(self.x))+','+str(round(self.y))+')'
+            return '('+str(round(self.x,1))+','+str(round(self.y,1))+')'
             
         def __repr__(self):
-            return '('+str(round(self.x))+','+str(round(self.y))+')'
+            return '('+str(round(self.x,1))+','+str(round(self.y,1))+')'
             
         def __hash__(self):
             return hash((self.x, self.y))
@@ -62,7 +71,8 @@ class RRTStar():
 
         def __eq__(self, other):
             try:
-                return (self.x, self.y) == (other.x, other.y)
+                # return (self.x, self.y) == (other.x, other.y)
+                return self.x == other.x and self.y == other.y
             except AttributeError:
                 return False
     
@@ -82,7 +92,8 @@ class RRTStar():
                  search_until_max_iter=False,
                  warm_start=True,
                  warm_start_tree_size=6000,
-                 robot_radius=0.0):
+                 robot_radius=0.0,
+                 human_referential=False):
         """
         Setting Parameter
 
@@ -94,6 +105,7 @@ class RRTStar():
         """
         
         self.start = self.Node(start[0], start[1])
+        self.start.trajectory_until_node = [self.start]
         self.end = self.Node(goal[0], goal[1])
         self.min_xrand = rand_area[0]
         self.max_xrand = rand_area[1]
@@ -105,7 +117,10 @@ class RRTStar():
         self.max_iter = max_iter
         self.obstacle_list = obstacle_list
         self.node_list = []
-        self.robot_radius = robot_radius
+        self.robot_radius = robot_radius,
+        self.human_referential = human_referential
+        
+        self.index_trajectory_iteration = 0
         
         self.connect_circle_dist = connect_circle_dist
         self.goal_node = self.Node(goal[0], goal[1])
@@ -146,11 +161,28 @@ class RRTStar():
             self.blocked_cells[(obstacle[0]//self.grid_size, obstacle[1]//self.grid_size)] = None
             for x,y in itertools.product([(obstacle[0]//self.grid_size)-1,obstacle[0]//self.grid_size,(obstacle[0]//self.grid_size)+1],[(obstacle[1]//self.grid_size)-1,obstacle[1]//self.grid_size,(obstacle[1]//self.grid_size)+1]):
                 self.blocked_cells[(x,y)] = None
-            # self.blocked_cells[(obstacle[0]//self.grid_size, obstacle[1]//self.grid_size)] = None
     
     
     def draw_graph(self, rnd=None, room_area=None):
         plt.clf()
+        # path_phi2 = [
+        # (200, 300), # left, bottom
+        # (200, 350), # left, top
+        # (250, 350), # right, top
+        # (250, 300), # right, bottom
+        # (0., 0.), # ignored
+        # ]
+        # fig = plt.figure()
+        # ax = fig.add_subplot(111)
+        # codes = [Path.MOVETO,
+         # Path.LINETO,
+         # Path.LINETO,
+         # Path.LINETO,
+         # Path.CLOSEPOLY,
+         # ]
+        # path4_2 = Path(path_phi2, codes)
+        # patch4_2 = patches.PathPatch(path4_2, facecolor='palegreen',lw=0)
+        # ax.add_patch(patch4_2)
         if room_area is not None:
             plt.xlim(room_area[:2])
             plt.ylim(room_area[2:])            
@@ -165,21 +197,24 @@ class RRTStar():
             plt.plot(rnd.x, rnd.y, "^k")
             if self.robot_radius > 0.0:
                 self.plot_circle(rnd.x, rnd.y, self.robot_radius, '-r')
-        for node in self.node_list:
-            if node.parent:
-                if node.blocking_cost == float("inf") or node.parent.blocking_cost == float("inf"):
-                    plt.plot([node.x,node.parent.x], [node.y,node.parent.y], "-y")
-                else:
-                    plt.plot([node.x,node.parent.x], [node.y,node.parent.y], "-g")
         # for node in self.rewired_r:
             # plt.plot(node.x, node.y, "1b")
         # for node in self.rewired_s:
-            # # plt.plot(node.x, node.y, "2c")
-        for node in self.rewired_s_success:
-            plt.plot(node.x, node.y, "2m")
+            # plt.plot(node.x, node.y, "2c")
+            
+        for node in self.node_list:
+            if node.parent:
+                plt.plot([node.x,node.parent.x], [node.y,node.parent.y], "-g")
+                # if node.blocking_cost == float("inf") or node.parent.blocking_cost == float("inf"):
+                    # plt.plot([node.x,node.parent.x], [node.y,node.parent.y], "-y")
+                # else:
+                    # plt.plot([node.x,node.parent.x], [node.y,node.parent.y], "-g")
+        # for node in self.rewired_s_success:
+            # plt.plot(node.x, node.y, "2m")
+            
         for (ox, oy, size) in self.obstacle_list:
             self.plot_circle(ox, oy, size)
-            # self.plot_ellipsis(ox, oy, size)
+            
         plt.plot(self.start.x, self.start.y, "or")
         plt.plot(self.end.x, self.end.y, "xr")
         plt.grid(True)
@@ -191,29 +226,7 @@ class RRTStar():
         dy = y - self.end.y
         return math.hypot(dx, dy)
     
-    
-    def nodes_inside_ellipsis(self,obstaclex,obstacley):
-        g_ell_center = (obstaclex-40, obstacley-40)
-        g_ell_width = 100
-        g_ell_height = 40
-        
-        angle = 45.
-        cos_angle = np.cos(np.radians(180.-angle))
-        sin_angle = np.sin(np.radians(180.-angle))
 
-        x = np.array([node.x for node in self.node_list])
-        y = np.array([node.y for node in self.node_list])
-        xc = x - g_ell_center[0]
-        yc = y - g_ell_center[1]
-
-        xct = xc * cos_angle - yc * sin_angle
-        yct = xc * sin_angle + yc * cos_angle 
-
-        rad_cc = (xct**2/(g_ell_width/2.)**2) + (yct**2/(g_ell_height/2.)**2)
-        
-        nodes_inside_ellipsis = [self.node_list[index] for index in np.where(rad_cc <= 1.)[0]]
-        # print(nodes_inside_ellipsis)
-        return nodes_inside_ellipsis
 
     @staticmethod
     def plot_circle(x, y, size, color="-b"):  # pragma: no cover
@@ -297,6 +310,9 @@ class RRTStar():
             new_node.y = to_node.y
 
         new_node.parent = from_node
+        new_node.trajectory_until_node = from_node.trajectory_until_node
+        self.update_trajectory_until_node(new_node.trajectory_until_node,new_node)
+        
         new_node.blocking_cost = from_node.blocking_cost
         
         return new_node
@@ -363,8 +379,8 @@ class RRTStar():
         return path, path_nodes
     
     
+        
     
-    #Finds all the nodes near to a given node (the nodes in the grid of the given node + adjacent grids)
     def find_nodes_near(self, node):
         X_near = []
         for x,y in itertools.product([(node.x//self.grid_size)-1,node.x//self.grid_size,(node.x//self.grid_size)+1],[(node.y//self.grid_size)-1,node.y//self.grid_size,(node.y//self.grid_size)+1]):
@@ -373,7 +389,7 @@ class RRTStar():
             X_near.remove(node)
         except ValueError:
             pass
-        return X_near
+        return X_near    
     
     
     #Returns the nearest node of a given node (in the ones in the grid of the given node + adjacent grids)
@@ -387,6 +403,7 @@ class RRTStar():
     def find_nearest_node_path(self, measured_robot_position, path_nodes):
         s = sorted(path_nodes, key=lambda path_node: math.hypot(measured_robot_position[0] - path_node.x, measured_robot_position[1] - path_node.y))
         return s[0]
+    
     
     
     def find_nodes_near_within_expanddis(self, node):
@@ -425,10 +442,7 @@ class RRTStar():
         #Remove nodes with distance greater than expand_dis
         X_near = [x_near for x_near in X_near if (math.hypot(node.x - x_near.x, node.y - x_near.y) <= self.expand_dis and x_near.blocking_cost != float("inf"))]
         s = sorted(X_near, key=lambda x_near: math.hypot(node.x - x_near.x, node.y - x_near.y))
-        # for x_near in s:
-            # print("\t\t",node,x_near,math.hypot(node.x - x_near.x, node.y - x_near.y))
         return s
-    
     
     
     def recursively_swap_parent_child(parent,child):
@@ -437,9 +451,9 @@ class RRTStar():
             path.append([round(node.x), round(node.y)])
             path_nodes.append(node)
             node = node.parent
-
-
-    def set_new_start_new_goal(self,new_start,new_goal):
+    
+    
+    def set_new_start_new_goal(self,new_start,new_goal, specification):
         new_start_node = self.find_nearest_node(self.Node(new_start[0],new_start[1]))
         new_end_node = self.find_nearest_node(self.Node(new_goal[0],new_goal[1]))
         
@@ -462,15 +476,36 @@ class RRTStar():
                 pass
             par.parent = child
         
+
+
         self.start.parent = None
         self.start.cost = 0
+        self.start.stl_cost = 0
+        self.update_trajectory_until_node([],self.start)
+        
+        if self.human_referential:
+            #Taking presumed angle between human origin and human goal
+            theta = math.atan2(250,250)
+            for node in self.node_list:
+                coordinates_in_human_ref = RRTStar.rotate([new_end_node.x,new_end_node.y],(node.x,node.y),theta)
+                node.x_humanreferential = coordinates_in_human_ref[0]
+                node.y_humanreferential = coordinates_in_human_ref[1]
+            for node in self.node_list:
+                node.trajectory_until_node_humanreferential = [[n_traj.x_humanreferential,n_traj.y_humanreferential] for n_traj in node.trajectory_until_node]
+        
         self.update_cost_to_leaves(self.start)
+        self.update_stl_cost_to_leaves(self.start, specification)
         self.end = new_end_node
         
+        self.stl_rewire_entire_tree_from_root(specification)
+    
+    
+    def rewire_entire_tree_from_root(self):
         #Rewire the entire tree from the root node
-        print("updating tree with start and end goal")
+        print("rewire from tree root")
         self.rewired_s = []
         self.rewired_s_success = []
+        #REWIRE FROM TREE ROOT
         if not self.Q_s:
             self.Q_s.append(self.start)
         time_start = time.time()
@@ -486,9 +521,11 @@ class RRTStar():
                     try:
                         del x_near.parent.children[x_near]
                     except KeyError:
-                        #TODO
+                        # print(x_near,"was already not a child of",x_near.parent)
                         pass
                     x_near.parent = x_s
+                    x_near.trajectory_until_node = x_s.trajectory_until_node
+                    self.update_trajectory_until_node(x_near.trajectory_until_node,x_near)
                     x_s.children[x_near] = None
                     x_near.cost = x_s.cost+math.hypot(x_near.x - x_s.x, x_near.y - x_s.y)
                     x_near.blocking_cost = x_s.blocking_cost
@@ -496,6 +533,57 @@ class RRTStar():
                     self.rewired_s_success.append(x_near)
                     self.Q_s.appendleft(x_near)    
                 self.rewired_s.append(x_near)
+        print("rewire from tree root processed in ",time.time()-time_start,"s")
+        print("end of warm start computation, tree size is ",len(self.node_list))
+    
+
+        
+    
+    
+    def stl_rewire_entire_tree_from_root(self, stl_formula):
+        #Rewire the entire tree from the root node
+        print("rewire from tree root")
+        self.rewired_s = []
+        self.rewired_s_success = []
+        #REWIRE FROM TREE ROOT
+        if not self.Q_s:
+            self.Q_s.append(self.start)
+        time_start = time.time()
+        while self.Q_s:
+            x_s = self.Q_s.popleft()
+            for child in x_s.children:
+                self.Q_s.append(child)
+            X_near = self.find_nodes_near_within_expanddis(x_s)
+            for x_near in X_near:
+                c_old = x_near.total_cost()
+                if self.human_referential:
+                    c_new = x_s.cost + math.hypot(x_s.x-x_near.x,x_s.y-x_near.y) + stl_formula.stl_test_new_cost_humanref(x_s,x_near) + x_s.blocking_cost
+                else:
+                    c_new = x_s.cost + math.hypot(x_s.x-x_near.x,x_s.y-x_near.y) + stl_formula.stl_test_new_cost(x_s,x_near) + x_s.blocking_cost
+                if c_new<c_old and self.line_is_free(x_s, x_near) and x_s not in self.successors(x_near):
+                    try:
+                        del x_near.parent.children[x_near]
+                    except KeyError:
+                        pass
+                    x_near.parent = x_s
+                    x_near.trajectory_until_node = x_s.trajectory_until_node
+                    x_near.trajectory_until_node_humanreferential = x_s.trajectory_until_node_humanreferential
+                    self.update_trajectory_until_node(x_near.trajectory_until_node,x_near)
+                    self.update_trajectory_until_node_humanreferential(x_near.trajectory_until_node_humanreferential,x_near)
+                    x_s.children[x_near] = None
+                    x_near.cost = x_s.cost+math.hypot(x_near.x - x_s.x, x_near.y - x_s.y)
+                    if self.human_referential:
+                        stl_formula.stl_rrt_cost_function_humanref(x_near)
+                    else:
+                        stl_formula.stl_rrt_cost_function(x_near)
+                    self.update_stl_cost_to_leaves(x_near, stl_formula)    
+                    x_near.blocking_cost = x_s.blocking_cost
+                    self.update_cost_to_leaves(x_near)
+                    self.rewired_s_success.append(x_near)
+                    self.Q_s.appendleft(x_near)  
+                self.rewired_s.append(x_near)
+        print("rewire from tree root processed in ",time.time()-time_start,"s")
+        print("end of warm start computation, tree size is ",len(self.node_list))
     
     
     def warm_start(self, number_nodes):
@@ -530,6 +618,8 @@ class RRTStar():
                 except Exception:
                     pass
                 self.end.parent = near_node
+                self.end.trajectory_until_node = near_node.trajectory_until_node
+                self.update_trajectory_until_node(self.end.trajectory_until_node,self.end)
                 self.end.parent.children[self.end] = None
                 continue
             
@@ -557,43 +647,13 @@ class RRTStar():
                     self.grid[new_node.x//self.grid_size][new_node.y//self.grid_size].append(new_node)
                     self.Q_r.append(new_node)
     
-        #Rewire the entire tree from the root node
-        print("rewire from tree root")
-        self.rewired_s = []
-        self.rewired_s_success = []
-        #REWIRE FROM TREE ROOT
-        if not self.Q_s:
-            self.Q_s.append(self.start)
-        time_start = time.time()
-        while self.Q_s:
-            x_s = self.Q_s.popleft()
-            for child in x_s.children:
-                self.Q_s.append(child)
-            X_near = self.find_nodes_near_within_expanddis(x_s)
-            for x_near in X_near:
-                c_old = x_near.total_cost()
-                c_new = x_s.total_cost()+math.hypot(x_s.x-x_near.x,x_s.y-x_near.y)
-                if c_new<c_old and self.line_is_free(x_s, x_near) and x_s not in self.successors(x_near):
-                    try:
-                        del x_near.parent.children[x_near]
-                    except KeyError:
-                        #TODO
-                        pass
-                    x_near.parent = x_s
-                    x_s.children[x_near] = None
-                    x_near.cost = x_s.cost+math.hypot(x_near.x - x_s.x, x_near.y - x_s.y)
-                    x_near.blocking_cost = x_s.blocking_cost
-                    self.update_cost_to_leaves(x_near)
-                    self.rewired_s_success.append(x_near)
-                    self.Q_s.appendleft(x_near)    
-                self.rewired_s.append(x_near)
-        print("rewire from tree root processed in ",time.time()-time_start,"s")
-        print("end of warm start computation, tree size is ",len(self.node_list))
+        self.rewire_entire_tree_from_root()
     
     
     
-    def rewire_unblocked_nodes(self,unblocked_cells,new_blocked_cells):
-
+    
+    def rewire_unblocked_nodes(self,unblocked_cells,new_blocked_cells,stl_formula):
+        print("rewire unblocked_nodes")
         #a dict with key the unblocked node, and value the min dist to a no blocked node
         unblocked_nodes = {}
         for unblocked_cell in unblocked_cells:
@@ -623,7 +683,12 @@ class RRTStar():
             X_near = self.find_nodes_near_within_expanddis_and_not_infcost(node,unblocked_cells,new_blocked_cells)
             if not X_near:
                 continue
-            costs  = [x_near.total_cost()+math.hypot(node.x - x_near.x, node.y - x_near.y) for x_near in X_near]
+            
+            if self.human_referential:
+                costs  = [x_near.cost + math.hypot(x_near.x - node.x, x_near.y - node.y) + stl_formula.stl_test_new_cost_humanref(x_near,node) + x_near.blocking_cost for x_near in X_near]
+            else:
+                costs  = [x_near.cost + math.hypot(x_near.x - node.x, x_near.y - node.y) + stl_formula.stl_test_new_cost(x_near,node) + x_near.blocking_cost for x_near in X_near]
+            
             new_parent = list(X_near)[costs.index(min(costs))]
             if self.line_is_free(new_parent, node) and new_parent not in self.successors(node):
                 try:
@@ -631,46 +696,112 @@ class RRTStar():
                 except KeyError:
                     pass
                 node.parent = new_parent
+                self.update_trajectory_until_node(node.trajectory_until_node,node)
+                if self.human_referential:
+                    self.update_trajectory_until_node_humanreferential(node.trajectory_until_node_humanreferential,node)
                 new_parent.children[node] = None
                 node.cost = new_parent.cost+math.hypot(node.x - new_parent.x, node.y - new_parent.y)
                 node.blocking_cost = new_parent.blocking_cost
+                if self.human_referential:
+                    stl_formula.stl_rrt_cost_function_humanref(node)
+                else:
+                    stl_formula.stl_rrt_cost_function(node)
+                self.update_stl_cost_to_leaves(node, stl_formula)   
                 self.update_cost_to_leaves(node)
                 self.rewired_s_success.append(node)
     
     
+    #when the agent moves of node, the "trajectory_until_node" of all the descendants of the old parent node are updated with the trajectory until the agent's new position
+    def update_trajectory_until_node(self,trajectory_until_node,node):
+        node.trajectory_until_node = trajectory_until_node + [node]
+        for child in node.children:
+            self.update_trajectory_until_node(node.trajectory_until_node,child)
+    
+    def update_trajectory_until_node_humanreferential(self,trajectory_until_node_humanreferential,node):
+        node.trajectory_until_node_humanreferential = trajectory_until_node_humanreferential + [[node.x_humanreferential,node.y_humanreferential]]
+        for child in node.children:
+            self.update_trajectory_until_node_humanreferential(node.trajectory_until_node_humanreferential,child)
     
     
-    def planning(self, animation=True, current_pos=None, updated_obstacle_list=None):
+    def rotate(origin, point, angle):
+        #Rotate a point counterclockwise by a given angle around a given origin.
+        #The angle should be given in radians.
+        x = origin[0] + math.cos(angle) * (point[0] - origin[0]) - math.sin(angle) * (point[1] - origin[1])
+        y = origin[1] + math.sin(angle) * (point[0] - origin[0]) + math.cos(angle) * (point[1] - origin[1])
+        return (x-origin[0], y-origin[1])
+    
+    
+    
+    def warmstart_update_stl_cost_humanref(self,first_human_position,specification):
+        #for each node, get its coordinates in the human referential
+        theta = math.atan2(1,1)
+        for node in self.node_list + [self.end]:
+            coordinates_in_human_ref = RRTStar.rotate(first_human_position,(node.x,node.y),theta)
+            node.x_humanreferential = coordinates_in_human_ref[0]
+            node.y_humanreferential = coordinates_in_human_ref[1]
+        
+        #for each node, get its trajectory until node in the human referential
+        for node in self.node_list:
+            for node_trajectory in node.trajectory_until_node:
+                node.trajectory_until_node_humanreferential.append([node_trajectory.x_humanreferential,node_trajectory.y_humanreferential])
+
+        #get STL cost of the root node
+        specification.stl_rrt_cost_function_root_node_humanref(self.start,self.start)
+        #spread the costs to the leaves
+        self.update_stl_cost_to_leaves(self.start,specification)
+        #rewire from root
+        self.stl_rewire_entire_tree_from_root(specification)
+        
+            
+    def planning(self, animation=True, current_pos=None, previous_human_position=None, updated_human_position=None, stl_specification=None):
         """
         rrt star path planning
 
         animation: flag for animation on or off .
-        """
+        """        
         
         #Update costs and tree's root
         time_start = time.time()
+        
+        
+        #calculate node's coordinates_in_human_ref
+        if self.human_referential:
+            """
+            #Taking angle between previous position and actual position
+            if previous_human_position != updated_human_position:
+                theta = math.atan2(previous_human_position[0]-updated_human_position[0], previous_human_position[1]-updated_human_position[1])
+                self.previous_theta = theta
+            else:
+                theta = self.previous_theta
+            """    
+            #Taking angle between human origin and human goal
+            theta = math.atan2(250,250)
+            for node in self.node_list:
+                coordinates_in_human_ref = RRTStar.rotate(updated_human_position,(node.x,node.y),theta)
+                node.x_humanreferential = coordinates_in_human_ref[0]
+                node.y_humanreferential = coordinates_in_human_ref[1]
+        
+        
         if current_pos is None:
             self.node_list = [self.start]
         elif self.start == current_pos:
-            #do nothing
-            pass
+            self.start.cost = 0
+            # self.start.stl_cost = 0
+            self.update_trajectory_until_node(self.start.trajectory_until_node+[current_pos],self.start)
+            self.index_trajectory_iteration += 1
+            #if specification is in the human referential, update trajectory until nodes in the human referential
+            if self.human_referential:
+                for node in self.node_list:
+                    node.trajectory_until_node_humanreferential = node.trajectory_until_node_humanreferential[:self.index_trajectory_iteration]
+                    for node_trajectory in node.trajectory_until_node[self.index_trajectory_iteration:]:
+                        node.trajectory_until_node_humanreferential.append([node_trajectory.x_humanreferential,node_trajectory.y_humanreferential])
+            if self.human_referential:
+                stl_specification.stl_rrt_cost_function_root_node_humanref(self.start,self.start)
+            else:
+                stl_specification.stl_rrt_cost_function_root_node(self.start,self.start)
+            self.update_stl_cost_to_leaves(self.start, stl_specification)
+            self.update_cost_to_leaves(self.start)
         else:
-            # nearest_ind = self.get_nearest_node_index(self.node_list, self.Node(current_pos[0],current_pos[1]))
-            # if self.node_list[nearest_ind] == self.start:
-                # print("no move was done")
-            # else:
-            #for the new start node, set its parent as children, and set no parent. Also, set the cost of the old parent as "inf" UNLESS the goal position is changed!
-            # old_start = self.start
-            # # self.start = self.node_list[nearest_ind]
-            # self.start = current_pos
-            # self.start.parent = None
-            # del old_start.children[self.start]
-            # old_start.parent = self.start
-            # self.start.children[old_start] = None
-            # self.start.cost = 0
-            # self.update_cost_to_leaves(self.start)
-            
-            
             old_start = self.start
             self.start = current_pos
             
@@ -679,6 +810,9 @@ class RRTStar():
             while processing_node != old_start:
                 chain.append(processing_node)
                 processing_node = processing_node.parent
+            sub_trajectory = [node for node in chain]
+            self.index_trajectory_iteration += len(sub_trajectory)
+            sub_trajectory.reverse()
             chain.append(old_start)        
             
             for elt in more_itertools.windowed(chain,n=2):
@@ -692,20 +826,46 @@ class RRTStar():
             
             self.start.parent = None
             self.start.cost = 0
+            # self.start.stl_cost = 0
+            self.update_trajectory_until_node(old_start.trajectory_until_node+sub_trajectory,self.start)
+            
+            #if specification is in the human referential, update trajectory until nodes in the human referential
+            if self.human_referential:
+                for node in self.node_list:
+                    node.trajectory_until_node_humanreferential = node.trajectory_until_node_humanreferential[:self.index_trajectory_iteration]
+                    for node_trajectory in node.trajectory_until_node[self.index_trajectory_iteration:]:
+                        node.trajectory_until_node_humanreferential.append([node_trajectory.x_humanreferential,node_trajectory.y_humanreferential])
+            
+            #for monitoring purposes, we need to reset a parent to the root of the tree!
+            self.start.parent = old_start
+            if self.human_referential:
+                stl_specification.stl_rrt_cost_function_root_node_humanref(self.start,old_start)
+            else:
+                stl_specification.stl_rrt_cost_function_root_node(self.start,old_start)
+            self.start.parent = None
+            
+            self.update_stl_cost_to_leaves(self.start, stl_specification)
             self.update_cost_to_leaves(self.start)
             
+        
+
+        
+        #for log purposes
+        cost_updating_costs = time.time()-time_start
+        print("updated costs in",cost_updating_costs)
+        # for node in self.node_list:
+            # print(node,node.stl_cost)
+        
         
         self.rewired_s = []
         self.rewired_s_success = []
         
-        
-        if updated_obstacle_list is not None:
-            self.obstacle_list = updated_obstacle_list
+        time_rewire_unblocked = time.time()
+        if updated_human_position is not None:
+            self.obstacle_list = [updated_human_position]
             new_blocked_cells = {}
-            for obstacle in self.obstacle_list:
-                # new_blocked_cells[(obstacle[0]//self.grid_size, obstacle[1]//self.grid_size)] = None
-                for x,y in itertools.product([(obstacle[0]//self.grid_size)-1,obstacle[0]//self.grid_size,(obstacle[0]//self.grid_size)+1],[(obstacle[1]//self.grid_size)-1,obstacle[1]//self.grid_size,(obstacle[1]//self.grid_size)+1]):
-                    new_blocked_cells[(x,y)] = None
+            for x,y in itertools.product([(updated_human_position[0]//self.grid_size)-1,updated_human_position[0]//self.grid_size,(updated_human_position[0]//self.grid_size)+1],[(updated_human_position[1]//self.grid_size)-1,updated_human_position[1]//self.grid_size,(updated_human_position[1]//self.grid_size)+1]):
+                new_blocked_cells[(x,y)] = None
                         
             became_blocked   = list(set(list(new_blocked_cells))-set(list(self.blocked_cells)))
             became_unblocked = list(set(list(self.blocked_cells))-set(list(new_blocked_cells)))
@@ -717,15 +877,7 @@ class RRTStar():
                     self.unblock_leaves(node)
                     
             #rewiring of unblocked nodes, since some of them might be rewired to parts of the tree that are not blocked!
-            self.rewire_unblocked_nodes(became_unblocked,new_blocked_cells)
-            
-            #nodes in front of the obstacle (ellipsis) are set to a high blocking cost
-            # nodes_inside_ellipsis = []
-            # for obstacle in self.obstacle_list:
-                # nodes_inside_ellipsis.extend(self.nodes_inside_ellipsis(obstacle[0],obstacle[1]))
-            # for node in nodes_inside_ellipsis:
-                # node.blocking_cost = float("inf")
-                # self.block_leaves(node)
+            self.rewire_unblocked_nodes(became_unblocked,new_blocked_cells,stl_specification)
                 
             #set newly blocked nodes blocking cost to inf and propagate to leaves
             for cell in new_blocked_cells:
@@ -733,16 +885,12 @@ class RRTStar():
                     node.blocking_cost = float("inf")
                     self.block_leaves(node)
             self.blocked_cells = new_blocked_cells
-
+        print("rewired unblocked in",time.time()-time_rewire_unblocked)
         
-
         
-        remaining_time = self.max_time - (time.time() - time_start)
-        
-        # print("rewire from tree root")
         #REWIRE FROM TREE ROOT
+        remaining_time = self.max_time - (time.time() - time_start)
         time_start = time.time()
-        # while time.time()-time_start < self.max_time * 0.9:
         while time.time()-time_start < remaining_time * 0.9:
             if not self.Q_s:
                 self.Q_s.append(self.start)
@@ -752,24 +900,35 @@ class RRTStar():
             X_near = self.find_nodes_near_within_expanddis(x_s)
             for x_near in X_near:
                 c_old = x_near.total_cost()
-                c_new = x_s.total_cost()+math.hypot(x_s.x-x_near.x,x_s.y-x_near.y)   
+                if self.human_referential:
+                    c_new = x_s.cost + math.hypot(x_s.x-x_near.x,x_s.y-x_near.y) + stl_specification.stl_test_new_cost_humanref(x_s,x_near) + x_s.blocking_cost
+                else:
+                    c_new = x_s.cost + math.hypot(x_s.x-x_near.x,x_s.y-x_near.y) + stl_specification.stl_test_new_cost(x_s,x_near) + x_s.blocking_cost
                 if c_new<c_old and self.line_is_free(x_s, x_near) and x_s not in self.successors(x_near):
                     try:
                         del x_near.parent.children[x_near]
                     except KeyError:
-                        #TODO fix this KeyError
-                        pass
+                        print(x_near,"was already not a child of",x_near.parent)
                     x_near.parent = x_s
+                    x_near.trajectory_until_node = x_s.trajectory_until_node
+                    self.update_trajectory_until_node(x_near.trajectory_until_node,x_near)
+                    if self.human_referential:
+                        x_near.trajectory_until_node_humanreferential = x_s.trajectory_until_node_humanreferential
+                        self.update_trajectory_until_node_humanreferential(x_near.trajectory_until_node_humanreferential,x_near)
                     x_s.children[x_near] = None
                     x_near.cost = x_s.cost+math.hypot(x_near.x - x_s.x, x_near.y - x_s.y)
                     x_near.blocking_cost = x_s.blocking_cost
+                    if self.human_referential:
+                        stl_specification.stl_rrt_cost_function_humanref(x_near)
+                    else:
+                        stl_specification.stl_rrt_cost_function(x_near)
+                    self.update_stl_cost_to_leaves(x_near, stl_specification)    
                     self.update_cost_to_leaves(x_near)
-                    self.rewired_s_success.append(x_near)
-                    # self.Q_s.append(x_near)
-                self.rewired_s.append(x_near)
-                    # self.Q_s.append(x_near)
-            # for child in x_s.children:
-                # self.Q_s.append(child)
+                    self.rewired_s_success.append(x_s)
+            self.rewired_s.append(x_s)
+
+        print("\ttested",len(self.rewired_s),"node for rewiring")
+        print("\trewired",len(self.rewired_s_success),"nodes")
 
         #we reblock the cells in the area of the obstacles, becaume maybe because of rewiring some cells that are actually blocked became unblocked
         for cell in new_blocked_cells:
@@ -777,7 +936,8 @@ class RRTStar():
                 node.blocking_cost = float("inf")
                 self.block_leaves(node)
 
-        return self.generate_path()
+
+        return self.generate_path(), cost_updating_costs, len(self.rewired_s)
 
 
     
@@ -954,6 +1114,8 @@ class RRTStar():
                 near_node.path_x = edge_node.path_x
                 near_node.path_y = edge_node.path_y
                 near_node.parent = edge_node.parent
+                near_node.trajectory_until_node = edge_node.trajectory_until_node
+                self.update_trajectory_until_node(near_node.trajectory_until_node,near_node)
                 self.propagate_cost_to_leaves(new_node)
     
     
@@ -997,7 +1159,8 @@ class RRTStar():
             lst.append(child)
             lst.extend(self.successors(child))
         return lst
-
+    
+    
     def update_cost_to_leaves(self, parent_node):
         for node in parent_node.children:
             node.cost = parent_node.cost+math.hypot(node.x - parent_node.x, node.y - parent_node.y)
@@ -1005,16 +1168,101 @@ class RRTStar():
             self.update_cost_to_leaves(node)  
     
     
-def main():
-    print("Start " + __file__)
+    def update_stl_cost_to_leaves(self, parent_node, stl_formula):
+        for node in parent_node.children:
+            if self.human_referential:
+                stl_formula.stl_rrt_cost_function_humanref(node)
+            else:
+                stl_formula.stl_rrt_cost_function(node)
+            node.blocking_cost = parent_node.blocking_cost
+            self.update_stl_cost_to_leaves(node, stl_formula)      
 
+
+
+def plot_human_referential(followed_path_human_referential):
+    plt.clf()
+    path_phi2 = [
+    (80, -60), # left, bottom
+    (80, 50), # left, top
+    (95, 50), # right, top
+    (95, -60), # right, bottom
+    (0., 0.), # ignored
+    ]
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    codes = [Path.MOVETO,
+     Path.LINETO,
+     Path.LINETO,
+     Path.LINETO,
+     Path.CLOSEPOLY,
+     ]
+    path4_2 = Path(path_phi2, codes)
+    patch4_2 = patches.PathPatch(path4_2, facecolor='palegreen',lw=0)
+    ax.add_patch(patch4_2)
+    plt.xlim([-100,100])
+    plt.ylim([-600,600])      
+    plt.gca().set_aspect('equal', adjustable='box')
+    
+    # for stopping simulation with the esc key.
+    plt.gcf().canvas.mpl_connect(
+        'key_release_event',
+        lambda event: [exit(0) if event.key == 'escape' else None])
+    
+    def plot_circle(x, y, size, color="-b"):  # pragma: no cover
+        deg = list(range(0, 360, 5))
+        deg.append(0)
+        xl = [x + size * math.cos(np.deg2rad(d)) for d in deg]
+        yl = [y + size * math.sin(np.deg2rad(d)) for d in deg]
+        plt.plot(xl, yl, color)
+        
+    plot_circle(0, 0, 20)
+    plt.plot([x for (x, y) in followed_path_human_referential], [y for (x, y) in followed_path_human_referential], 'r--')
+    plt.grid(True)
+    # plt.show()
+    plt.savefig('img/stl_refhuman.png')
+
+    
+def main():
+    
+    #testing STL specification (in the room's referential)
+    alpha,beta,gamma,delta,t1,t2 = 150,200,300,350,20,40
+    test_pepper_condition = STLPredicate2D(0,1,alpha,beta,gamma,delta)
+    test_eventually_untimed = Untimed_Eventually(test_pepper_condition)
+    test_eventually_timed = Eventually(test_pepper_condition,t1,t2)
+    test_always_untimed = Untimed_Always(test_pepper_condition)
+    test_always_timed = Always(test_pepper_condition,t1,t2)
+    
+    test_several_zones = Conjunction([Always(STLPredicate2D(0,1,400,450,50,100),15,25),Always(STLPredicate2D(0,1,100,150,350,400),35,55)])
+    
+    #specification for human-robot encounters (in the human/obstacle referential)
+    hurry_left = STLPredicate2D(0,1,-80,-70,-100,0)
+    hurry_right = STLPredicate2D(0,1,60,75,-60,50)
+    hurry = Disjunction([hurry_left,hurry_right])
+    untimed_specification_hurry = Untimed_Eventually(hurry)
+    timed_specification_hurry = Eventually(hurry,25,35)
+    
+    walk_left = STLPredicate2D(0,1,-90,-80,-90,0)
+    walk_right = STLPredicate2D(0,1,70,85,-60,50)
+    walk = Disjunction([walk_left,walk_right])
+    untimed_specification_walk = Untimed_Eventually(walk)
+    timed_specification_walk = Eventually(walk,30,40)
+    
+    fragile_left = STLPredicate2D(0,1,-95,-80,-150,-45)
+    fragile_right = STLPredicate2D(0,1,80,95,-60,50)
+    fragile = Disjunction([fragile_left,fragile_right])
+    untimed_specification_fragile = Untimed_Eventually(fragile)
+    timed_specification_fragile = Eventually(fragile,35,45)
+    
+
+    
+    
     # ====Search Path with RRT====
     obstacle_list = [
-        (470,390,20)
+        (470.0,390.0,20)
         # (200, 165, 20),
         # (300, 248, 20)
     ]  # [x,y,size(radius)]
-
+    
     # Set Initial parameters
     
     #expand_dis=8  Pepper max speed is 80cm.s-1 = 8cm.ds-1 (we have a refresh frequency of 10Hz or every 100ms)
@@ -1025,148 +1273,87 @@ def main():
     
     ENVIRONMENT = {}
     radius_obs = 20
-    # ENVIRONMENT[0.0]=[(470.0,390.0,radius_obs),(0,0,radius_obs)]
-    ENVIRONMENT[0.0]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.1]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.2]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.3]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.4]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.5]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.6]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.7]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.8]=[(470,390,radius_obs)]
-    ENVIRONMENT[0.9]=[(470,390,radius_obs)]
-    ENVIRONMENT[1.0]=[(461,383,radius_obs)]
-    ENVIRONMENT[1.1]=[(453,376,radius_obs)]
-    ENVIRONMENT[1.2]=[(444,369,radius_obs)]
-    ENVIRONMENT[1.3]=[(436,362,radius_obs)]
-    ENVIRONMENT[1.4]=[(428,356,radius_obs)]
-    ENVIRONMENT[1.5]=[(419,349,radius_obs)]
-    ENVIRONMENT[1.6]=[(411,342,radius_obs)]
-    ENVIRONMENT[1.7]=[(402,335,radius_obs)]
-    ENVIRONMENT[1.8]=[(394,328,radius_obs)]
-    ENVIRONMENT[1.9]=[(386,322,radius_obs)]
-    ENVIRONMENT[2.0]=[(377,315,radius_obs)]
-    ENVIRONMENT[2.1]=[(369,308,radius_obs)]
-    ENVIRONMENT[2.2]=[(360,301,radius_obs)]
-    ENVIRONMENT[2.3]=[(352,294,radius_obs)]
-    ENVIRONMENT[2.4]=[(344,288,radius_obs)]
-    ENVIRONMENT[2.5]=[(335,281,radius_obs)]
-    ENVIRONMENT[2.6]=[(327,274,radius_obs)]
-    ENVIRONMENT[2.7]=[(318,267,radius_obs)]
-    ENVIRONMENT[2.8]=[(310,260,radius_obs)]
-    ENVIRONMENT[2.9]=[(302,254,radius_obs)]
-    ENVIRONMENT[3.0]=[(293,247,radius_obs)]
-    ENVIRONMENT[3.1]=[(285,240,radius_obs)]
-    ENVIRONMENT[3.2]=[(276,233,radius_obs)]
-    ENVIRONMENT[3.3]=[(268,226,radius_obs)]
-    ENVIRONMENT[3.4]=[(260,220,radius_obs)]
-    ENVIRONMENT[3.5]=[(251,213,radius_obs)]
-    ENVIRONMENT[3.6]=[(243,206,radius_obs)]
-    ENVIRONMENT[3.7]=[(234,199,radius_obs)]
-    ENVIRONMENT[3.8]=[(226,192,radius_obs)]
-    ENVIRONMENT[3.9]=[(218,186,radius_obs)]
-    ENVIRONMENT[4.0]=[(209,179,radius_obs)]
-    ENVIRONMENT[4.1]=[(201,172,radius_obs)]
-    ENVIRONMENT[4.2]=[(192,165,radius_obs)]
-    ENVIRONMENT[4.3]=[(184,158,radius_obs)]
-    ENVIRONMENT[4.4]=[(176,152,radius_obs)]
-    ENVIRONMENT[4.5]=[(167,145,radius_obs)]
-    ENVIRONMENT[4.6]=[(159,138,radius_obs)]
-    ENVIRONMENT[4.7]=[(150,131,radius_obs)]
-    ENVIRONMENT[4.8]=[(142,124,radius_obs)]
-    ENVIRONMENT[4.9]=[(134,118,radius_obs)]
-    ENVIRONMENT[5.0]=[(125,111,radius_obs)]
-    ENVIRONMENT[5.1]=[(117,104,radius_obs)]
-    ENVIRONMENT[5.2]=[(108,97,radius_obs)]
-    ENVIRONMENT[5.3]=[(100,90,radius_obs)]
-    ENVIRONMENT[5.4]=[(92,84,radius_obs)]
-    ENVIRONMENT[5.5]=[(83,77,radius_obs)]
-    ENVIRONMENT[5.6]=[(75,70,radius_obs)]
-    ENVIRONMENT[5.7]=[(66,63,radius_obs)]
-    ENVIRONMENT[5.8]=[(58,56,radius_obs)]
-    ENVIRONMENT[5.9]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.0]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.1]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.2]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.3]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.4]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.5]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.6]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.7]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.8]=[(50,50,radius_obs)]
-    ENVIRONMENT[6.9]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.0]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.1]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.2]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.3]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.4]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.5]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.6]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.7]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.8]=[(50,50,radius_obs)]
-    ENVIRONMENT[7.9]=[(50,50,radius_obs)]
-    ENVIRONMENT[8.0]=[(50,50,radius_obs)]
-    # ENVIRONMENT[8.1]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.2]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.3]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.4]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.5]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.6]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.7]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.8]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[8.9]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.0]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.1]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.2]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.3]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.4]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.5]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.6]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.7]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.8]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[9.9]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.0]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.1]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.2]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.3]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.4]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.5]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.6]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.7]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.8]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[10.9]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.0]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.1]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.2]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.3]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.4]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.5]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.6]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.7]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.8]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[11.9]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.0]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.1]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.2]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.3]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.4]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.5]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.6]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.7]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.8]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[12.9]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.0]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.1]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.2]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.3]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.4]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.5]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.6]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.7]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.8]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[13.9]=[(50.0,50.0,radius_obs)]
-    # ENVIRONMENT[14.0]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[0.0]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.1]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.2]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.3]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.4]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.5]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.6]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.7]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.8]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[0.9]=[(470.0,390.0,radius_obs)]
+    ENVIRONMENT[1.0]=[(461.6,383.2,radius_obs)]
+    ENVIRONMENT[1.1]=[(453.2,376.4,radius_obs)]
+    ENVIRONMENT[1.2]=[(444.8,369.6,radius_obs)]
+    ENVIRONMENT[1.3]=[(436.4,362.8,radius_obs)]
+    ENVIRONMENT[1.4]=[(428.0,356.0,radius_obs)]
+    ENVIRONMENT[1.5]=[(419.6,349.2,radius_obs)]
+    ENVIRONMENT[1.6]=[(411.2,342.4,radius_obs)]
+    ENVIRONMENT[1.7]=[(402.8,335.6,radius_obs)]
+    ENVIRONMENT[1.8]=[(394.4,328.8,radius_obs)]
+    ENVIRONMENT[1.9]=[(386.0,322.0,radius_obs)]
+    ENVIRONMENT[2.0]=[(377.6,315.2,radius_obs)]
+    ENVIRONMENT[2.1]=[(369.2,308.4,radius_obs)]
+    ENVIRONMENT[2.2]=[(360.8,301.6,radius_obs)]
+    ENVIRONMENT[2.3]=[(352.4,294.8,radius_obs)]
+    ENVIRONMENT[2.4]=[(344.0,288.0,radius_obs)]
+    ENVIRONMENT[2.5]=[(335.6,281.2,radius_obs)]
+    ENVIRONMENT[2.6]=[(327.2,274.4,radius_obs)]
+    ENVIRONMENT[2.7]=[(318.8,267.6,radius_obs)]
+    ENVIRONMENT[2.8]=[(310.4,260.8,radius_obs)]
+    ENVIRONMENT[2.9]=[(302.0,254.0,radius_obs)]
+    ENVIRONMENT[3.0]=[(293.6,247.2,radius_obs)]
+    ENVIRONMENT[3.1]=[(285.2,240.4,radius_obs)]
+    ENVIRONMENT[3.2]=[(276.8,233.6,radius_obs)]
+    ENVIRONMENT[3.3]=[(268.4,226.8,radius_obs)]
+    ENVIRONMENT[3.4]=[(260.0,220.0,radius_obs)]
+    ENVIRONMENT[3.5]=[(251.6,213.2,radius_obs)]
+    ENVIRONMENT[3.6]=[(243.2,206.4,radius_obs)]
+    ENVIRONMENT[3.7]=[(234.8,199.6,radius_obs)]
+    ENVIRONMENT[3.8]=[(226.4,192.8,radius_obs)]
+    ENVIRONMENT[3.9]=[(218.0,186.0,radius_obs)]
+    ENVIRONMENT[4.0]=[(209.6,179.2,radius_obs)]
+    ENVIRONMENT[4.1]=[(201.2,172.4,radius_obs)]
+    ENVIRONMENT[4.2]=[(192.8,165.6,radius_obs)]
+    ENVIRONMENT[4.3]=[(184.4,158.8,radius_obs)]
+    ENVIRONMENT[4.4]=[(176.0,152.0,radius_obs)]
+    ENVIRONMENT[4.5]=[(167.6,145.2,radius_obs)]
+    ENVIRONMENT[4.6]=[(159.2,138.4,radius_obs)]
+    ENVIRONMENT[4.7]=[(150.8,131.6,radius_obs)]
+    ENVIRONMENT[4.8]=[(142.4,124.8,radius_obs)]
+    ENVIRONMENT[4.9]=[(134.0,118.0,radius_obs)]
+    ENVIRONMENT[5.0]=[(125.6,111.2,radius_obs)]
+    ENVIRONMENT[5.1]=[(117.2,104.4,radius_obs)]
+    ENVIRONMENT[5.2]=[(108.8,97.6,radius_obs)]
+    ENVIRONMENT[5.3]=[(100.4,90.8,radius_obs)]
+    ENVIRONMENT[5.4]=[(92.0,84.0,radius_obs)]
+    ENVIRONMENT[5.5]=[(83.6,77.2,radius_obs)]
+    ENVIRONMENT[5.6]=[(75.2,70.4,radius_obs)]
+    ENVIRONMENT[5.7]=[(66.8,63.6,radius_obs)]
+    ENVIRONMENT[5.8]=[(58.4,56.8,radius_obs)]
+    ENVIRONMENT[5.9]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.0]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.1]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.2]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.3]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.4]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.5]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.6]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.7]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.8]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[6.9]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.0]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.1]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.2]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.3]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.4]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.5]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.6]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.7]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.8]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[7.9]=[(50.0,50.0,radius_obs)]
+    ENVIRONMENT[8.0]=[(50.0,50.0,radius_obs)]
 
     
     
@@ -1190,27 +1377,72 @@ def main():
         # grid_size=20,
         # warm_start=True,
         # warm_start_tree_size=TREE_SIZE,
-        # robot_radius=30)
+        # robot_radius=24)
+        
+    #for alex, 2022-05-31
+    # path = rrt_star.planning(animation=show_animation,current_pos=[50, 50],updated_obstacle_list=[])
+    # path.reverse()
+    # print(path)
+    # exit()
+
+    #If we want to print the warm start tree
+    # rrt_star.draw_graph(room_area=[0,520,0,440])
+    # plt.grid(True)
+    # plt.show()
     
-    # #save a pre-computed tree as pickle
-    # with open("tree_200_1500_20220804.dill", "wb") as dill_file:
+    #save a pre-computed tree as pickle
+    # with open("stl_specifications/stl_tree_200_1500.dill", "wb") as dill_file:
         # dill.dump(rrt_star, dill_file)    
     # exit()
     
-    # #load a pre-existing pickled tree
-    rrt_star = dill.load(open("tree_200_1500_20220804.dill", "rb"))
+    #load a pre-existing pickled tree
+    # rrt_star = dill.load(open("stl_specifications/stl_tree_200_1500.dill", "rb"))
+
+
+    # specification = specification_hurry_left
+    # specification = specification_hurry_right
+    # specification = specification_walk_left
+    # specification = specification_walk_right
+    # specification = specification_fragile_left
+    # specification = specification_fragile_right
+
+    # specification = specification_hurry
+    # specification = specification_walk
+    specification = Eventually(hurry_right,25,35)
+    specification = untimed_specification_fragile
     
-    #July 5 - useful when restarting from not exact position, or with a custom goal
-    new_start = [50,50]
-    new_goal = [366,335]
-    rrt_star.set_new_start_new_goal(new_start,new_goal)
+    
+    
+
+    # #update stl costs and rewire from tree root
+    # print("update stl costs")
+    # first_human_position = [470,390]
+    # rrt_star.warmstart_update_stl_cost_humanref(first_human_position,specification)
+        
+    # with open("stl_specifications/stl_tree_200_1500_rewired_fragile_right.dill", "wb") as dill_file:
+        # dill.dump(rrt_star, dill_file)   
+    # print("rewiring done")
+    # exit()
+
+    # rrt_star = dill.load(open("stl_specifications/stl_tree_200_1500_rewired_fragile_right.dill", "rb"))
+    with open("../stl_specifications/stl_tree_200_1500_rewired_fragile_right.dill", "rb") as f:
+        rrt_star = dill.load(f)
+    rrt_star.human_referential = True
+    print(type(rrt_star))
+    print(dir(rrt_star))
+    print(rrt_star.start)
+
+    #Useful when restarting from not exact position, or with a custom goal
+    # new_start = [65,60]
+    # new_goal = [420,350]
+    # rrt_star.set_new_start_new_goal(new_start,new_goal,specification)
     
     move_pepper = [0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.2, 2.4, 2.6, 2.8, 3, 3.2, 3.4, 3.6, 3.8, 4, 4.2, 4.4, 4.6, 4.8, 5, 5.2, 5.4, 5.6, 5.8, 6, 6.2, 6.4, 6.6, 6.8, 7, 7.2, 7.4, 7.6, 7.8, 8]
 
-    
+    followed_path_human_referential = []
+    previous_human_position = [478.4,396.8]
+
     for t in ENVIRONMENT:
-    
-        # ENVIRONMENT[t]=[(180,190,radius_obs)]
 
         #Update current position with the first goal of last calculated path
         #TODO REAL EXP PEPPER: replace path[1] by the measured current position of Pepper
@@ -1222,7 +1454,10 @@ def main():
         #fake this in simulation
         try:
             if t in move_pepper:
-                measured_robot_position = [path[1][0]+random.random(),path[1][1]+random.random()]
+                try:
+                    measured_robot_position = [path[1][0]+random.random(),path[1][1]+random.random()]
+                except IndexError:
+                    measured_robot_position = [path[0][0]+random.random(),path[0][1]+random.random()]
                 current_pos = rrt_star.find_nearest_node_path(measured_robot_position, path_nodes)
                 print("measured position",measured_robot_position,current_pos)
             else:
@@ -1231,65 +1466,62 @@ def main():
                 print("measured position",measured_robot_position,current_pos)
         except UnboundLocalError:
             current_pos = rrt_star.start
-        except IndexError:
-            measured_robot_position = [path[0][0]+random.random(),path[0][1]+random.random()]
-            current_pos = rrt_star.find_nearest_node_path(measured_robot_position, path_nodes)
-            print("measured position",measured_robot_position,current_pos)
+        
+        
         
         
 
         #Plan for the current iteration of given frequency
-        #TODO REAL EXP PEPPER: replace "ENVIRONMENT[t]" in the "updated_obstacle_list=ENVIRONMENT[t]" by the measured positions of the human/obstacle
+        #TODO REAL EXP PEPPER: replace "ENVIRONMENT[t][0]" in the "updated_human_position=ENVIRONMENT[t][0]" by the measured positions of the human/obstacle
         start_time = time.time()
-        path, path_nodes = rrt_star.planning(animation=show_animation,current_pos=current_pos,updated_obstacle_list=ENVIRONMENT[t])
+        (path, path_nodes), cost_updating_costs, nb_of_rewiring_checks = rrt_star.planning(animation=show_animation,current_pos=current_pos,previous_human_position=previous_human_position,updated_human_position=ENVIRONMENT[t][0],stl_specification=specification)
         elapsed = (time.time() - start_time)
+        
+        
+        # if t==1.2:
+            # dico = {}
+            # for node in rrt_star.node_list:
+                # dico[node] = node.stl_cost
+            # sorteddico = {k: v for k, v in sorted(dico.items(), key=lambda item: item[1])}
+            # for node in sorteddico:
+                # print(node,sorteddico[node])
+            # exit()
         
         path.reverse()
         path_nodes.reverse()
         #!! path[0] is the recorded position of the agent, and path[1] is the next waypoint !!
         
-        print("t=",t,", found path in",elapsed,"seconds")
+        print("t=",t,", found path in",elapsed,"seconds. Updated costs in",cost_updating_costs)
         print(path)
-        #TODO REAL EXP PEPPER: use path[1] as the next goal to reach, then path[2], path[3] etc...
-        #RESOLUTION 10Hz = 1 point per 100ms
         
+                
         try:
             if path[1] == [rrt_star.end.x,rrt_star.end.y]:
                 break
         except IndexError:
             if path[0] == [rrt_star.end.x,rrt_star.end.y]:
                 break
+            
+        try:    
+            followed_path_human_referential.append((round(path_nodes[1].x_humanreferential),round(path_nodes[1].y_humanreferential)))
+        except IndexError:
+            followed_path_human_referential.append((round(path_nodes[0].x_humanreferential),round(path_nodes[0].y_humanreferential)))
+        #TODO REAL EXP PEPPER: use path[1] as the next goal to reach, then path[2], path[3] etc...
+        #RESOLUTION 10Hz = 1 point per 100ms
         
         rrt_star.draw_graph(room_area=[0,520,0,440])
         plt.plot([x for (x, y) in path], [y for (x, y) in path], 'r--')
         plt.grid(True)
         # plt.show()
-        plt.savefig('img/'+str(t)+'.png')
+        plt.savefig('img/'+str(t)+'_stl.png')
         
-        print("\n")
-
-    
+        print("\n\n\n")
+        
+    print(followed_path_human_referential)
+    # plot_human_referential(followed_path_human_referential)
     
     exit()
     
     
-
-
-
-
-# x = [50,470]
-# y = [50,390]
-# i = 0
-# for x, y in zip([470-((470-50)/50)*i for i in range(0,51)], list(np.interp([470-((470-50)/50)*i for i in range(0,51)], x, y))):
-    # print("ENVIRONMENT[",i,"] = [(",x,",",y,",radius_obs),(0,0,radius_obs)]")
-    # i += 0.1
-
-# k = 5.1
-# for i in range(0,40):
-    # print("ENVIRONMENT[",round(k,1),"] = [(50.0,50.0,radius_obs),(0,0,radius_obs)]")
-    # k += 0.1
-
-
-
 if __name__ == '__main__':
     main()

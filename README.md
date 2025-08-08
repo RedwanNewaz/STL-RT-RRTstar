@@ -1,8 +1,27 @@
 # Real-time STL-RRT\* for Social Robot Navigation
 Code for robot real-time path planning under STL specifications
+The original code didn't work. I have fixed it and made it more manageable.
+Examples can be found in the `examples` folder.
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.1234567.svg)](https://doi.org/10.5281/zenodo.1234567)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
+## Installation 
+To install the package, clone this repository and install the required dependencies:
+
+```bash
+pip install -e .
+```
+## Running the code
+To run the code, you need to have Python 3.8 or higher installed along with the required dependencies.
+You can the example code in the `examples` folder to see how to use the STL-RT-RRT\* algorithm for real-time path planning with STL specifications.:
+
+```bash 
+cd examples
+python test_pepper.py
+```
 ## Introduction
 
 In the context of social navigation with a mobile robot, we present an approach for real-time path-planning in a dynamic environment under spatio-temporal constraints expressed in Signal Temporal Logic (STL).
